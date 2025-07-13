@@ -95,12 +95,12 @@ func calculateAQI(concentration float64, breakpoints []AQIBreakpoint) int {
 	for _, bp := range breakpoints {
 		if concentration >= bp.ConcLow && concentration <= bp.ConcHigh {
 			// Apply EPA AQI formula
-			aqi := ((float64(bp.AQIHigh-bp.AQILow) / (bp.ConcHigh - bp.ConcLow)) * 
+			aqi := ((float64(bp.AQIHigh-bp.AQILow) / (bp.ConcHigh - bp.ConcLow)) *
 				(concentration - bp.ConcLow)) + float64(bp.AQILow)
 			return int(math.Round(aqi))
 		}
 	}
-	
+
 	// If concentration exceeds all breakpoints, return 500+ (hazardous)
 	return 500
 }
@@ -110,7 +110,7 @@ func calculateAQI(concentration float64, breakpoints []AQIBreakpoint) int {
 func computeAQI(pm25, pm10 float64) int {
 	aqiPM25 := calculateAQI(pm25, pm25Breakpoints)
 	aqiPM10 := calculateAQI(pm10, pm10Breakpoints)
-	
+
 	// Return the maximum AQI value
 	if aqiPM25 > aqiPM10 {
 		return aqiPM25
@@ -132,38 +132,38 @@ func main() {
 	opts.SetKeepAlive(60 * time.Second)
 	opts.SetDefaultPublishHandler(messageHandler)
 	opts.SetConnectionLostHandler(connectionLostHandler)
-	
+
 	// Create MQTT client
 	client := mqtt.NewClient(opts)
-	
+
 	// Connect to MQTT broker
 	if token := client.Connect(); token.Wait() && token.Error() != nil {
 		log.Fatalf("Failed to connect to MQTT broker: %v", token.Error())
 	}
-	
+
 	log.Printf("Connected to MQTT broker at %s", broker)
-	
+
 	// Subscribe to input topic
 	if token := client.Subscribe(inputTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
 		handleMessage(client, msg, outputTopic)
 	}); token.Wait() && token.Error() != nil {
 		log.Fatalf("Failed to subscribe to topic %s: %v", inputTopic, token.Error())
 	}
-	
+
 	log.Printf("Subscribed to topic: %s", inputTopic)
 	log.Printf("Publishing AQI data to topic: %s", outputTopic)
-	
+
 	// Wait for interrupt signal to gracefully shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	<-sigChan
-	
+
 	log.Println("Shutting down...")
-	
+
 	// Unsubscribe and disconnect
 	client.Unsubscribe(inputTopic)
 	client.Disconnect(250)
-	
+
 	log.Println("Shutdown complete")
 }
 
@@ -177,35 +177,35 @@ func connectionLostHandler(client mqtt.Client, err error) {
 
 func handleMessage(client mqtt.Client, msg mqtt.Message, outputTopic string) {
 	log.Printf("Processing message from topic: %s", msg.Topic())
-	
+
 	// Parse JSON message
 	var reading SensorReading
 	if err := json.Unmarshal(msg.Payload(), &reading); err != nil {
 		log.Printf("Error parsing JSON: %v", err)
 		return
 	}
-	
+
 	// Calculate AQI using PM2.5 and PM10 values
 	// Using the standard values as they represent ambient conditions
 	aqi := computeAQI(reading.PM02Standard, reading.PM10Standard)
-	
+
 	// Create output message with AQI
 	aqiReading := AQIReading{
 		SensorReading: reading,
-		AQI:          aqi,
+		AQI:           aqi,
 	}
-	
+
 	// Marshal to JSON
 	outputJSON, err := json.Marshal(aqiReading)
 	if err != nil {
 		log.Printf("Error marshaling output JSON: %v", err)
 		return
 	}
-	
+
 	// Publish to output topic
 	token := client.Publish(outputTopic, 1, false, outputJSON)
 	token.Wait()
-	
+
 	if token.Error() != nil {
 		log.Printf("Error publishing to topic %s: %v", outputTopic, token.Error())
 	} else {
