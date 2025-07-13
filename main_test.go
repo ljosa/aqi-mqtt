@@ -1,0 +1,307 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"testing"
+	"time"
+
+	mqtt "github.com/eclipse/paho.mqtt.golang"
+)
+
+const (
+	testBrokerPort = "21883"
+	testBroker     = "tcp://localhost:" + testBrokerPort
+	testInputTopic = "test/airgradient/readings"
+	testOutputTopic = "test/aqi"
+	containerName  = "mqtt-test-broker"
+)
+
+// startMosquitto starts a Mosquitto MQTT broker in Docker
+func startMosquitto(t *testing.T) {
+	t.Helper()
+	
+	// Stop any existing container
+	_ = exec.Command("docker", "stop", containerName).Run()
+	_ = exec.Command("docker", "rm", containerName).Run()
+	
+	// Get current working directory for mounting config
+	pwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get working directory: %v", err)
+	}
+	
+	// Start Mosquitto container with custom config
+	cmd := exec.Command("docker", "run", "-d",
+		"--name", containerName,
+		"-p", testBrokerPort+":1883",
+		"-v", pwd+"/test-mosquitto.conf:/mosquitto/config/mosquitto.conf",
+		"eclipse-mosquitto")
+	
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// Check if Docker is running
+		if dockerErr := exec.Command("docker", "info").Run(); dockerErr != nil {
+			t.Skip("Docker is not running, skipping end-to-end test")
+		}
+		// Check if port is already in use
+		if execErr := exec.Command("lsof", "-i", ":"+testBrokerPort).Run(); execErr == nil {
+			t.Skip("Port " + testBrokerPort + " is already in use, skipping test")
+		}
+		t.Fatalf("Failed to start Mosquitto: %v\nOutput: %s", err, output)
+	}
+	
+	// Wait for broker to be ready
+	waitForBroker(t, testBroker)
+}
+
+// waitForBroker waits for the MQTT broker to be ready
+func waitForBroker(t *testing.T, broker string) {
+	t.Helper()
+	
+	// Try to connect for up to 10 seconds
+	deadline := time.Now().Add(10 * time.Second)
+	
+	for time.Now().Before(deadline) {
+		opts := mqtt.NewClientOptions()
+		opts.AddBroker(broker)
+		opts.SetClientID("test-wait-client")
+		opts.SetConnectTimeout(1 * time.Second)
+		
+		client := mqtt.NewClient(opts)
+		token := client.Connect()
+		
+		if token.WaitTimeout(1 * time.Second) && token.Error() == nil {
+			client.Disconnect(250)
+			return // Broker is ready
+		}
+		
+		time.Sleep(500 * time.Millisecond)
+	}
+	
+	t.Fatal("Timeout waiting for broker to be ready")
+}
+
+// stopMosquitto stops and removes the Mosquitto container
+func stopMosquitto(t *testing.T) {
+	t.Helper()
+	
+	cmd := exec.Command("docker", "stop", containerName)
+	if err := cmd.Run(); err != nil {
+		t.Logf("Failed to stop container: %v", err)
+	}
+	
+	cmd = exec.Command("docker", "rm", containerName)
+	if err := cmd.Run(); err != nil {
+		t.Logf("Failed to remove container: %v", err)
+	}
+}
+
+// createTestClient creates an MQTT client for testing
+func createTestClient(t *testing.T, clientID string) mqtt.Client {
+	t.Helper()
+	
+	opts := mqtt.NewClientOptions()
+	opts.AddBroker(testBroker)
+	opts.SetClientID(clientID)
+	opts.SetConnectTimeout(5 * time.Second)
+	
+	client := mqtt.NewClient(opts)
+	token := client.Connect()
+	if !token.WaitTimeout(5 * time.Second) {
+		t.Fatal("Timeout connecting to broker")
+	}
+	if err := token.Error(); err != nil {
+		t.Fatalf("Failed to connect to broker: %v", err)
+	}
+	
+	return client
+}
+
+func TestEndToEndHappyPath(t *testing.T) {
+	// Start Mosquitto
+	startMosquitto(t)
+	defer stopMosquitto(t)
+	
+	// Create test client
+	testClient := createTestClient(t, "test-client")
+	defer testClient.Disconnect(250)
+	
+	// Channel to receive output message
+	outputChan := make(chan *AQIReading, 1)
+	
+	// Subscribe to output topic
+	token := testClient.Subscribe(testOutputTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
+		var reading AQIReading
+		if err := json.Unmarshal(msg.Payload(), &reading); err != nil {
+			t.Errorf("Failed to parse output message: %v", err)
+			return
+		}
+		outputChan <- &reading
+	})
+	
+	if !token.WaitTimeout(5 * time.Second) || token.Error() != nil {
+		t.Fatalf("Failed to subscribe to output topic: %v", token.Error())
+	}
+	
+	// Start the daemon in a goroutine
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	
+	go func() {
+		// Create daemon client
+		opts := mqtt.NewClientOptions()
+		opts.AddBroker(testBroker)
+		opts.SetClientID("aqi-daemon-test")
+		opts.SetKeepAlive(60 * time.Second)
+		
+		client := mqtt.NewClient(opts)
+		if token := client.Connect(); token.Wait() && token.Error() != nil {
+			t.Errorf("Daemon failed to connect: %v", token.Error())
+			return
+		}
+		
+		// Subscribe to input topic
+		token := client.Subscribe(testInputTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
+			handleMessage(client, msg, testOutputTopic)
+		})
+		
+		if token.Wait() && token.Error() != nil {
+			t.Errorf("Daemon failed to subscribe: %v", token.Error())
+			return
+		}
+		
+		// Keep running until context is cancelled
+		<-ctx.Done()
+		client.Disconnect(250)
+	}()
+	
+	// Wait for daemon to be ready
+	time.Sleep(1 * time.Second)
+	
+	// Prepare test input
+	testInput := SensorReading{
+		PM01:            2,
+		PM02:            4,
+		PM10:            4,
+		PM01Standard:    2,
+		PM02Standard:    35.7,  // Should result in AQI ~102
+		PM10Standard:    45,    // Should result in AQI ~41
+		PM003Count:      303.5,
+		PM005Count:      249.67,
+		PM01Count:       39.5,
+		PM02Count:       2,
+		Atmp:            24.1,
+		AtmpCompensated: 23.35,
+		Rhum:            60.7,
+		RhumCompensated: 83.76,
+		PM02Compensated: 2.61,
+		RCO2:            417,
+		TVOCIndex:       48,
+		TVOCRaw:         32520.83,
+		NOXIndex:        2,
+		NOXRaw:          17731.08,
+		Boot:            2378,
+		BootCount:       2378,
+		Wifi:            -69,
+		SerialNo:        "d83bda1d7660",
+		Firmware:        "3.2.0",
+		Model:           "O-1PST",
+	}
+	
+	// Publish test message
+	inputJSON, err := json.Marshal(testInput)
+	if err != nil {
+		t.Fatalf("Failed to marshal test input: %v", err)
+	}
+	
+	token = testClient.Publish(testInputTopic, 1, false, inputJSON)
+	if !token.WaitTimeout(5 * time.Second) || token.Error() != nil {
+		t.Fatalf("Failed to publish test message: %v", token.Error())
+	}
+	
+	// Wait for output
+	select {
+	case output := <-outputChan:
+		// Verify output contains original data
+		if output.SerialNo != testInput.SerialNo {
+			t.Errorf("Serial number mismatch: got %s, want %s", output.SerialNo, testInput.SerialNo)
+		}
+		if output.PM02Standard != testInput.PM02Standard {
+			t.Errorf("PM2.5 mismatch: got %f, want %f", output.PM02Standard, testInput.PM02Standard)
+		}
+		
+		// Verify AQI was calculated
+		if output.AQI == 0 {
+			t.Error("AQI was not calculated (is 0)")
+		}
+		
+		// Based on PM2.5=35.7 and PM10=45, the AQI should be ~102 (from PM2.5)
+		expectedAQI := 102
+		tolerance := 2
+		if output.AQI < expectedAQI-tolerance || output.AQI > expectedAQI+tolerance {
+			t.Errorf("AQI calculation seems incorrect: got %d, expected ~%d", output.AQI, expectedAQI)
+		}
+		
+		t.Logf("Successfully received AQI: %d", output.AQI)
+		
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for output message")
+	}
+}
+
+// TestAQICalculation tests the AQI calculation logic directly
+func TestAQICalculation(t *testing.T) {
+	testCases := []struct {
+		name     string
+		pm25     float64
+		pm10     float64
+		expected int
+	}{
+		{"Good air quality", 8.0, 20.0, 33},
+		{"Moderate air quality", 35.4, 50.0, 100},
+		{"Unhealthy for sensitive groups", 55.4, 100.0, 150},
+		{"Very unhealthy", 250.4, 350.0, 300},
+		{"Hazardous", 400.0, 500.0, 434},
+		{"PM10 dominant", 10.0, 200.0, 123}, // PM10 AQI higher than PM2.5
+	}
+	
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := computeAQI(tc.pm25, tc.pm10)
+			// Allow small tolerance for rounding
+			if result < tc.expected-1 || result > tc.expected+1 {
+				t.Errorf("computeAQI(%f, %f) = %d, want ~%d", tc.pm25, tc.pm10, result, tc.expected)
+			}
+		})
+	}
+}
+
+// TestAQIBreakpointEdgeCases tests edge cases in AQI calculation
+func TestAQIBreakpointEdgeCases(t *testing.T) {
+	// Test exact breakpoint values
+	testCases := []struct {
+		pm25     float64
+		expected int
+	}{
+		{0.0, 0},      // Minimum
+		{12.0, 50},    // Exact breakpoint
+		{12.1, 51},    // Just over breakpoint
+		{35.4, 100},   // Exact breakpoint
+		{35.5, 101},   // Just over breakpoint
+		{500.4, 500},  // Maximum defined breakpoint
+		{600.0, 500},  // Beyond maximum (should cap at 500)
+	}
+	
+	for _, tc := range testCases {
+		t.Run(fmt.Sprintf("PM2.5=%.1f", tc.pm25), func(t *testing.T) {
+			result := calculateAQI(tc.pm25, pm25Breakpoints)
+			if result != tc.expected {
+				t.Errorf("calculateAQI(%f) = %d, want %d", tc.pm25, result, tc.expected)
+			}
+		})
+	}
+}
