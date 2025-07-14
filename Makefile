@@ -3,13 +3,17 @@
 # Default target
 all: build
 
+# Get git commit hash with -dirty if working directory has changes
+GIT_COMMIT := $(shell git describe --always --dirty 2>/dev/null || echo "unknown")
+BUILD_TIME := $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
+
 # Build the daemon
 build:
-	go build -o aqi-mqtt-daemon
+	go build -ldflags "-X main.GitCommit=$(GIT_COMMIT) -X main.BuildTime=$(BUILD_TIME)" -o aqi-mqtt-daemon
 
 # Cross-compile for Linux AMD64
 build-linux:
-	GOOS=linux GOARCH=amd64 go build -o aqi-mqtt-daemon-linux-amd64
+	GOOS=linux GOARCH=amd64 go build -ldflags "-X main.GitCommit=$(GIT_COMMIT) -X main.BuildTime=$(BUILD_TIME)" -o aqi-mqtt-daemon-linux-amd64
 
 # Run all tests
 test:

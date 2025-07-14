@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
+	"fmt"
 	"log"
 	"math"
 	"os"
@@ -119,6 +121,18 @@ func computeAQI(pm25, pm10 float64) int {
 }
 
 func main() {
+	// Parse command-line flags
+	versionFlag := flag.Bool("version", false, "Print version information")
+	flag.Parse()
+
+	// Handle version flag
+	if *versionFlag {
+		fmt.Printf("AQI MQTT Daemon\n")
+		fmt.Printf("Git Commit: %s\n", GitCommit)
+		fmt.Printf("Build Time: %s\n", BuildTime)
+		os.Exit(0)
+	}
+
 	// MQTT configuration
 	broker := "tcp://192.168.2.71:1883"
 	inputTopic := "airgradient/readings/d83bda1d7660"
