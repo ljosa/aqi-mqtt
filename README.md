@@ -8,12 +8,15 @@ A Go daemon that listens to AirGradient sensor readings via MQTT and calculates 
 - Parses incoming JSON sensor data
 - Calculates AQI using EPA methodology
 - Publishes enriched data with AQI value to output topic
+- Configurable MQTT broker, topics, and client ID via command-line flags
+- Automatic unique client ID generation to prevent conflicts
+- Version information with git commit and build time
 - Graceful shutdown on interrupt signals
 
 ## Prerequisites
 
 - Go 1.19 or higher
-- Access to MQTT broker (default: 192.168.2.71:1883)
+- Access to an MQTT broker
 - AirGradient sensor publishing to MQTT
 
 ## Installation
@@ -26,28 +29,50 @@ cd /path/to/aqi-mqtt
 go mod tidy
 
 # Build the daemon
-go build -o aqi-mqtt-daemon
+make build
+
+# Or manually with version info
+GIT_COMMIT=$(git describe --always --dirty)
+BUILD_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+go build -ldflags "-X main.GitCommit=$GIT_COMMIT -X main.BuildTime=$BUILD_TIME" -o aqi-mqtt-daemon
 ```
 
 ## Usage
 
-Run the daemon:
+### Basic Usage
+
+Run the daemon with required parameters:
 ```bash
-./aqi-mqtt-daemon
+./aqi-mqtt-daemon -broker <host> -input-topic <topic> -output-topic <topic>
 ```
 
-The daemon will:
-1. Connect to MQTT broker at `192.168.2.71:1883`
-2. Subscribe to topic `airgradient/readings/d83bda1d7660`
-3. Calculate AQI for each incoming message
-4. Publish results to topic `aqi`
+### Command-Line Options
 
-## Configuration
+**Required:**
+- `-broker` - MQTT broker hostname or IP address
+- `-input-topic` - MQTT topic to subscribe for sensor readings
+- `-output-topic` - MQTT topic to publish AQI data
 
-Currently, the MQTT broker and topics are hardcoded in `main.go`. To modify:
-- Broker address: Line 109
-- Input topic: Line 110  
-- Output topic: Line 111
+**Optional:**
+- `-port` - MQTT broker port (default: 1883)
+- `-client-id` - MQTT client ID (default: aqi-mqtt-<pid>)
+- `--version` - Print version information and exit
+
+### Examples
+
+```bash
+# Connect to local broker with default port
+./aqi-mqtt-daemon -broker localhost -input-topic airgradient/readings/sensor1 -output-topic aqi/sensor1
+
+# Connect to remote broker with custom port
+./aqi-mqtt-daemon -broker 192.168.1.100 -port 1884 -input-topic sensors/air -output-topic processed/aqi
+
+# Use custom client ID
+./aqi-mqtt-daemon -broker mqtt.example.com -input-topic input -output-topic output -client-id my-aqi-processor
+
+# Check version
+./aqi-mqtt-daemon --version
+```
 
 ## Input Format
 
@@ -81,10 +106,13 @@ The project includes comprehensive tests with an end-to-end test using Docker:
 
 ```bash
 # Run all tests (requires Docker)
-go test -v
+make test
 
 # Run only unit tests (no Docker required)
-go test -v -run TestAQICalculation
+make test-unit
+
+# Run only end-to-end tests (requires Docker)
+make test-e2e
 ```
 
 The end-to-end test:
