@@ -131,4 +131,4 @@ To modify the AQI calculation or add support for additional pollutants:
 
 ## License
 
-This project is provided as-is for educational and monitoring purposes.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
