@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -147,36 +146,29 @@ func TestEndToEndHappyPath(t *testing.T) {
 		t.Fatalf("Failed to subscribe to output topic: %v", token.Error())
 	}
 
-	// Start the daemon in a goroutine
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// Build the daemon
+	buildCmd := exec.Command("go", "build", "-o", "test-aqi-daemon", ".")
+	if err := buildCmd.Run(); err != nil {
+		t.Fatalf("Failed to build daemon: %v", err)
+	}
+	defer os.Remove("test-aqi-daemon")
 
-	go func() {
-		// Create daemon client
-		opts := mqtt.NewClientOptions()
-		opts.AddBroker(testBroker)
-		opts.SetClientID("aqi-daemon-test")
-		opts.SetKeepAlive(60 * time.Second)
-
-		client := mqtt.NewClient(opts)
-		if token := client.Connect(); token.Wait() && token.Error() != nil {
-			t.Errorf("Daemon failed to connect: %v", token.Error())
-			return
+	// Start the daemon with proper command-line flags
+	daemonCmd := exec.Command("./test-aqi-daemon",
+		"-broker", "localhost",
+		"-port", testBrokerPort,
+		"-input-topic", testInputTopic,
+		"-output-topic", testOutputTopic,
+		"-client-id", "aqi-daemon-test")
+	
+	if err := daemonCmd.Start(); err != nil {
+		t.Fatalf("Failed to start daemon: %v", err)
+	}
+	defer func() {
+		if err := daemonCmd.Process.Kill(); err != nil {
+			t.Logf("Failed to kill daemon process: %v", err)
 		}
-
-		// Subscribe to input topic
-		token := client.Subscribe(testInputTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
-			handleMessage(client, msg, testOutputTopic)
-		})
-
-		if token.Wait() && token.Error() != nil {
-			t.Errorf("Daemon failed to subscribe: %v", token.Error())
-			return
-		}
-
-		// Keep running until context is cancelled
-		<-ctx.Done()
-		client.Disconnect(250)
+		daemonCmd.Wait()
 	}()
 
 	// Wait for daemon to be ready

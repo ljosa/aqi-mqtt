@@ -127,6 +127,7 @@ func main() {
 	brokerPort := flag.Int("port", 1883, "MQTT broker port (default: 1883)")
 	inputTopic := flag.String("input-topic", "", "MQTT topic to subscribe for sensor readings (required)")
 	outputTopic := flag.String("output-topic", "", "MQTT topic to publish AQI data (required)")
+	clientID := flag.String("client-id", "", "MQTT client ID (default: aqi-mqtt-<pid>)")
 	flag.Parse()
 
 	// Handle version flag
@@ -147,12 +148,16 @@ func main() {
 
 	// MQTT configuration
 	broker := fmt.Sprintf("tcp://%s:%d", *brokerHost, *brokerPort)
-	clientID := "aqi-calculator"
+
+	// Generate unique client ID if not provided
+	if *clientID == "" {
+		*clientID = fmt.Sprintf("aqi-mqtt-%d", os.Getpid())
+	}
 
 	// Configure MQTT client options
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(broker)
-	opts.SetClientID(clientID)
+	opts.SetClientID(*clientID)
 	opts.SetKeepAlive(60 * time.Second)
 	opts.SetDefaultPublishHandler(messageHandler)
 	opts.SetConnectionLostHandler(connectionLostHandler)
@@ -165,7 +170,7 @@ func main() {
 		log.Fatalf("Failed to connect to MQTT broker: %v", token.Error())
 	}
 
-	log.Printf("Connected to MQTT broker at %s", broker)
+	log.Printf("Connected to MQTT broker at %s with client ID: %s", broker, *clientID)
 
 	// Subscribe to input topic
 	if token := client.Subscribe(*inputTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
