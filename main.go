@@ -123,6 +123,10 @@ func computeAQI(pm25, pm10 float64) int {
 func main() {
 	// Parse command-line flags
 	versionFlag := flag.Bool("version", false, "Print version information")
+	brokerHost := flag.String("broker", "", "MQTT broker hostname or IP address (required)")
+	brokerPort := flag.Int("port", 1883, "MQTT broker port (default: 1883)")
+	inputTopic := flag.String("input-topic", "", "MQTT topic to subscribe for sensor readings (required)")
+	outputTopic := flag.String("output-topic", "", "MQTT topic to publish AQI data (required)")
 	flag.Parse()
 
 	// Handle version flag
@@ -133,10 +137,16 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Validate required flags
+	if *brokerHost == "" || *inputTopic == "" || *outputTopic == "" {
+		fmt.Fprintf(os.Stderr, "Error: Missing required flags\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: %s -broker <host> -input-topic <topic> -output-topic <topic> [-port <port>]\n\n", os.Args[0])
+		flag.PrintDefaults()
+		os.Exit(1)
+	}
+
 	// MQTT configuration
-	broker := "tcp://192.168.2.71:1883"
-	inputTopic := "airgradient/readings/d83bda1d7660"
-	outputTopic := "aqi"
+	broker := fmt.Sprintf("tcp://%s:%d", *brokerHost, *brokerPort)
 	clientID := "aqi-calculator"
 
 	// Configure MQTT client options
@@ -158,14 +168,14 @@ func main() {
 	log.Printf("Connected to MQTT broker at %s", broker)
 
 	// Subscribe to input topic
-	if token := client.Subscribe(inputTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
-		handleMessage(client, msg, outputTopic)
+	if token := client.Subscribe(*inputTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
+		handleMessage(client, msg, *outputTopic)
 	}); token.Wait() && token.Error() != nil {
-		log.Fatalf("Failed to subscribe to topic %s: %v", inputTopic, token.Error())
+		log.Fatalf("Failed to subscribe to topic %s: %v", *inputTopic, token.Error())
 	}
 
-	log.Printf("Subscribed to topic: %s", inputTopic)
-	log.Printf("Publishing AQI data to topic: %s", outputTopic)
+	log.Printf("Subscribed to topic: %s", *inputTopic)
+	log.Printf("Publishing AQI data to topic: %s", *outputTopic)
 
 	// Wait for interrupt signal to gracefully shutdown
 	sigChan := make(chan os.Signal, 1)
@@ -175,7 +185,7 @@ func main() {
 	log.Println("Shutting down...")
 
 	// Unsubscribe and disconnect
-	client.Unsubscribe(inputTopic)
+	client.Unsubscribe(*inputTopic)
 	client.Disconnect(250)
 
 	log.Println("Shutdown complete")
