@@ -44,11 +44,11 @@ func startMosquitto(t *testing.T) {
 	if err != nil {
 		// Check if Docker is running
 		if dockerErr := exec.Command("docker", "info").Run(); dockerErr != nil {
-			t.Skip("Docker is not running, skipping end-to-end test")
+			t.Fatalf("Docker is not running. Please start Docker to run end-to-end tests.")
 		}
 		// Check if port is already in use
 		if execErr := exec.Command("lsof", "-i", ":"+testBrokerPort).Run(); execErr == nil {
-			t.Skip("Port " + testBrokerPort + " is already in use, skipping test")
+			t.Fatalf("Port %s is already in use. Please free the port or use a different port.", testBrokerPort)
 		}
 		t.Fatalf("Failed to start Mosquitto: %v\nOutput: %s", err, output)
 	}
@@ -120,6 +120,49 @@ func createTestClient(t *testing.T, clientID string) mqtt.Client {
 	return client
 }
 
+// waitForDaemonReady waits for the daemon to be ready by checking if it responds to messages
+func waitForDaemonReady(t *testing.T, inputTopic string) bool {
+	t.Helper()
+
+	// Create a test client to verify daemon is ready
+	verifyClient := createTestClient(t, "verify-daemon-client")
+	defer verifyClient.Disconnect(250)
+
+	// Subscribe to the output topic to see if daemon responds
+	readyChan := make(chan bool, 1)
+	token := verifyClient.Subscribe(testOutputTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
+		readyChan <- true
+	})
+	if !token.WaitTimeout(2*time.Second) || token.Error() != nil {
+		t.Logf("Failed to subscribe for readiness check: %v", token.Error())
+		return false
+	}
+	defer verifyClient.Unsubscribe(testOutputTopic)
+
+	// Try for up to 5 seconds
+	deadline := time.Now().Add(5 * time.Second)
+	
+	for time.Now().Before(deadline) {
+		// Send a small test message to see if daemon processes it
+		testMsg := `{"pm02Standard": 10.0, "pm10Standard": 10.0}`
+		token := verifyClient.Publish(inputTopic, 0, false, []byte(testMsg))
+		if token.WaitTimeout(1*time.Second) && token.Error() == nil {
+			// Wait for response
+			select {
+			case <-readyChan:
+				t.Log("Daemon is ready - received response to test message")
+				return true
+			case <-time.After(500 * time.Millisecond):
+				// Try again
+			}
+		}
+		
+		time.Sleep(200 * time.Millisecond)
+	}
+	
+	return false
+}
+
 func TestEndToEndHappyPath(t *testing.T) {
 	// Start Mosquitto
 	startMosquitto(t)
@@ -161,6 +204,13 @@ func TestEndToEndHappyPath(t *testing.T) {
 		"-output-topic", testOutputTopic,
 		"-client-id", "aqi-daemon-test")
 	
+	// Capture daemon output for debugging in test logs
+	// This helps when tests fail to see what the daemon was doing
+	if testing.Verbose() {
+		daemonCmd.Stdout = os.Stdout
+		daemonCmd.Stderr = os.Stderr
+	}
+	
 	if err := daemonCmd.Start(); err != nil {
 		t.Fatalf("Failed to start daemon: %v", err)
 	}
@@ -171,8 +221,24 @@ func TestEndToEndHappyPath(t *testing.T) {
 		daemonCmd.Wait()
 	}()
 
-	// Wait for daemon to be ready
-	time.Sleep(1 * time.Second)
+	// Wait for daemon to be ready by checking if it can accept connections
+	if !waitForDaemonReady(t, testInputTopic) {
+		t.Fatal("Daemon failed to become ready within timeout")
+	}
+
+	// Wait a moment and clear any readiness check messages
+	time.Sleep(500 * time.Millisecond)
+	for {
+		select {
+		case <-outputChan:
+			// Discard any pending message from readiness check
+			t.Log("Cleared a readiness check message from output channel")
+		default:
+			// No more pending messages
+			goto done
+		}
+	}
+	done:
 
 	// Prepare test input
 	testInput := SensorReading{
