@@ -50,6 +50,12 @@ type AQIReading struct {
 	AQI int `json:"aqi"`
 }
 
+// topicConfig holds the topic configuration for reconnection
+type topicConfig struct {
+	inputTopic  string
+	outputTopic string
+}
+
 // AQI breakpoint structure for calculations
 type AQIBreakpoint struct {
 	ConcLow  float64
@@ -154,13 +160,37 @@ func main() {
 		*clientID = fmt.Sprintf("aqi-mqtt-%d", os.Getpid())
 	}
 
+	// Create channels for topic info
+	topicInfo := &topicConfig{
+		inputTopic:  *inputTopic,
+		outputTopic: *outputTopic,
+	}
+
 	// Configure MQTT client options
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(broker)
 	opts.SetClientID(*clientID)
-	opts.SetKeepAlive(60 * time.Second)
+	opts.SetKeepAlive(30 * time.Second)
+	opts.SetPingTimeout(10 * time.Second)
+	opts.SetConnectTimeout(30 * time.Second)
+	opts.SetAutoReconnect(true)
+	opts.SetMaxReconnectInterval(1 * time.Minute)
 	opts.SetDefaultPublishHandler(messageHandler)
-	opts.SetConnectionLostHandler(connectionLostHandler)
+	opts.SetConnectionLostHandler(func(client mqtt.Client, err error) {
+		log.Printf("Connection lost: %v. Will attempt to reconnect automatically.", err)
+	})
+	opts.SetOnConnectHandler(func(client mqtt.Client) {
+		log.Printf("Connected/Reconnected to MQTT broker at %s", broker)
+		// Re-subscribe to topics after reconnection
+		if token := client.Subscribe(topicInfo.inputTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
+			handleMessage(client, msg, topicInfo.outputTopic)
+		}); token.Wait() && token.Error() != nil {
+			log.Printf("Failed to subscribe to topic %s: %v", topicInfo.inputTopic, token.Error())
+		} else {
+			log.Printf("Subscribed to topic: %s", topicInfo.inputTopic)
+			log.Printf("Publishing AQI data to topic: %s", topicInfo.outputTopic)
+		}
+	})
 
 	// Create MQTT client
 	client := mqtt.NewClient(opts)
@@ -170,18 +200,6 @@ func main() {
 		log.Fatalf("Failed to connect to MQTT broker: %v", token.Error())
 	}
 
-	log.Printf("Connected to MQTT broker at %s with client ID: %s", broker, *clientID)
-
-	// Subscribe to input topic
-	if token := client.Subscribe(*inputTopic, 1, func(client mqtt.Client, msg mqtt.Message) {
-		handleMessage(client, msg, *outputTopic)
-	}); token.Wait() && token.Error() != nil {
-		log.Fatalf("Failed to subscribe to topic %s: %v", *inputTopic, token.Error())
-	}
-
-	log.Printf("Subscribed to topic: %s", *inputTopic)
-	log.Printf("Publishing AQI data to topic: %s", *outputTopic)
-
 	// Wait for interrupt signal to gracefully shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -190,7 +208,7 @@ func main() {
 	log.Println("Shutting down...")
 
 	// Unsubscribe and disconnect
-	client.Unsubscribe(*inputTopic)
+	client.Unsubscribe(topicInfo.inputTopic)
 	client.Disconnect(250)
 
 	log.Println("Shutdown complete")
