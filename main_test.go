@@ -363,3 +363,32 @@ func TestAQIBreakpointEdgeCases(t *testing.T) {
 		})
 	}
 }
+
+// TestPM10BreakpointGap tests the critical gap between 54 and 55 for PM10
+func TestPM10BreakpointGap(t *testing.T) {
+	// Test PM10 values around the 54-55 boundary where the bug occurred
+	testCases := []struct {
+		pm10     float64
+		expected int
+	}{
+		{53.0, 48},  // Just below first breakpoint upper bound
+		{54.0, 49},  // At first breakpoint upper bound
+		{54.5, 50},  // In the gap - should be in first tier
+		{54.9, 50},  // Just below 55
+		{55.0, 51},  // At second breakpoint lower bound
+		{55.1, 51},  // Just above 55
+		{100.0, 73}, // Middle value in second tier
+		{154.0, 100}, // Near upper bound of second tier
+		{154.5, 100}, // In the gap between 154 and 155
+		{155.0, 101}, // At third breakpoint lower bound
+	}
+
+	for _, tc := range testCases {
+		t.Run(fmt.Sprintf("PM10=%.1f", tc.pm10), func(t *testing.T) {
+			result := calculateAQI(tc.pm10, pm10Breakpoints)
+			if result != tc.expected {
+				t.Errorf("calculateAQI(PM10=%f) = %d, want %d", tc.pm10, result, tc.expected)
+			}
+		})
+	}
+}

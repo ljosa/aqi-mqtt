@@ -78,13 +78,13 @@ var pm25Breakpoints = []AQIBreakpoint{
 
 // PM10 AQI breakpoints based on EPA standards
 var pm10Breakpoints = []AQIBreakpoint{
-	{0, 54, 0, 50},
-	{55, 154, 51, 100},
-	{155, 254, 101, 150},
-	{255, 354, 151, 200},
-	{355, 424, 201, 300},
-	{425, 504, 301, 400},
-	{505, 604, 401, 500},
+	{0, 54.9, 0, 50},
+	{55, 154.9, 51, 100},
+	{155, 254.9, 101, 150},
+	{255, 354.9, 151, 200},
+	{355, 424.9, 201, 300},
+	{425, 504.9, 301, 400},
+	{505, 604.9, 401, 500},
 }
 
 // calculateAQI computes the Air Quality Index
